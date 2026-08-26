@@ -41,7 +41,7 @@ Dimensional Ripper 是一个基于 **NeoForge 1.21.1** 的多线程维度并行�
 
 ## 许可证
 
-All Rights Reserved © 2026 xxdd001
+[MIT License](LICENSE) © 2026 xxdd001
 
 ---
 
