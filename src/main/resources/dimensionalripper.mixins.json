@@ -11,6 +11,7 @@
         "BlockableEventLoopPollMixin",
         "BlockDropCaptureMixin",
         "BrainMixin",
+        "ChunkMapEntityMapMixin",
         "ChunkMapLoadOffloadMixin",
         "ClassInstanceMultiMapMixin",
         "CollectingNeighborUpdaterMixin",
