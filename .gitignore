@@ -1,0 +1,18 @@
+# Gradle 构建产物
+.gradle/
+build/
+out/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# 运行时数据
+runs/
+logs/
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
