@@ -78,9 +78,14 @@ public abstract class MinecraftServerDimMixin {
         ci.cancel();
     }
 
-    /** 服务器停止时：先停维度 loop，再关闭线程池，防止挂起。 */
+    /** 服务器停止时：先等所有维度 tick 收口，再停 loop、关线程池，防止保存与 worker 并发卡死。 */
     @Inject(method = "stopServer", at = @At("HEAD"))
     public void modzuozhi_shutdownThreadpool(CallbackInfo ci) {
+        // 必须先等正在执行的维度 tick 完全退出再进入保存：否则主线程 saveAllChunks 会与
+        // 仍在飞的维度 worker（level.tick → processUnloads）并发修改 ChunkMap.toDrop
+        // （非线程安全 fastutil 结构），导致「正在保存中」无限卡死（只能强杀进程）。
+        // stopLoopsAndWaitIdle 先 kill 下一拍、再自旋等 isTicking()==false（30s 看门狗）。
+        DimThreadCore.MANAGER.stopLoopsAndWaitIdle();
         DimThreadCore.MANAGER.killAllLoops();
         DimThreadCore.MANAGER.threadPools.forEach((server, pool) -> pool.shutdown());
         DimThreadCore.MANAGER.clear();

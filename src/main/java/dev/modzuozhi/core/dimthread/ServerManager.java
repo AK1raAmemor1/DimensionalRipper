@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * 每服务器激活状态与线程池管理（dimthreads 模型）。
@@ -198,6 +199,35 @@ public class ServerManager {
         LevelTickLoop loop = this.loops.remove(level);
         if (loop != null) {
             loop.kill();
+        }
+    }
+
+    /**
+     * 停止所有维度 loop 并<b>等待正在执行的 tick 完全收口</b>（服务器停机时调用）。
+     * <p>
+     * 仅 {@link #killAllLoops()}（置 running=false + cancel 下一次自排程）不等待正在运行的 tick：
+     * {@code cancel(true)} 只能取消尚未开始的任务，对正在执行 {@code LevelTickLoop.internalTick}
+     * 的维度 worker 无效。于是 stopServer 之后主线程的 {@code saveAllChunks} 会与仍在飞的维度
+     * worker（{@code level.tick → processUnloads → ChunkMap.toDrop}）并发修改非线程安全的
+     * {@code ChunkMap.toDrop}（fastutil Long2ObjectLinkedOpenHashMap），结构损坏后主线程保存
+     * 无限卡死（表现为「正在保存中」冻结，只能强杀后台进程）。
+     * <p>
+     * 因此先 kill 全部 loop（停掉下一拍，配合 ticking 标志阻止再进入），再自旋等待每个 loop 的
+     * {@code isTicking()==false}（worker 已完全退出当前 tick，含内部子任务屏障收口），
+     * 带 30s 看门狗防止异常场景下永久阻塞。
+     */
+    public void stopLoopsAndWaitIdle() {
+        this.loops.values().forEach(LevelTickLoop::kill);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        for (LevelTickLoop loop : this.loops.values()) {
+            while (loop.isTicking()) {
+                if (System.nanoTime() > deadline) {
+                    ModZuozhi.LOGGER.warn("[DimThread] 等待维度 {} loop 收口超时（>30s），强制继续",
+                            loop.getLevel().dimension().location());
+                    break;
+                }
+                LockSupport.parkNanos(100_000L); // 0.1ms 退避
+            }
         }
     }
 
