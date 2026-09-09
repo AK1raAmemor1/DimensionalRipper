@@ -1,18 +1,53 @@
-# Gradle 构建产物
+# Gradle / 构建产物
 .gradle/
 build/
 out/
+
+# Minecraft 运行时
+run/
+runs/
+logs/
+
+# 已废弃的流式 Demo（仅剩运行时残壳，不纳入仓库）
+streamdemo/
 
 # IDE
 .idea/
 .vscode/
 *.iml
+bin/
 
-# 运行时数据
-runs/
-logs/
+# 参考/分析目录（MCMT、Tessellate、folia、原版源码等，体量大不进仓库）
+_mcmt_analysis/
+_mcmt*
+_chlorophyll_analysis/
+_dimthreads_ref/
+_tessellate_analysis/
+_src_tmp/
+_srcpkg/
+_tmp_inspect/
+_tmpclass/
+folia-1.21.1-src/
+vanilla-1.21.1-src/
+craftengine-demo/
+
+# 调试诊断残留
 *.log
+*_dump*.txt
+threaddump*.txt
+thread_dump*.txt
+jstack*.txt
+deadlock*.txt
+runcheck*.txt
+runclient_log.txt
+runclient_launch.log
+game_deadlock.txt
+worldcreate_stuck.txt
+capture_walk.ps1
 
-# 系统文件
+# 历史打包产物
+modzuozhi-*.jar
+
+# 系统
 .DS_Store
 Thumbs.db

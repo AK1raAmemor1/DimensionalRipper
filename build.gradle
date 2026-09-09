@@ -23,6 +23,14 @@ java {
     withSourcesJar()
 }
 
+// 方案A验证用：无 mod 源码集（仅承载 Demo 资源，不注册任何模组）
+sourceSets {
+    demo {
+        java { srcDir 'src/demo/java' }
+        resources { srcDir 'src/demo/resources' }
+    }
+}
+
 //minecraft.accessTransformers.file rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
 //minecraft.accessTransformers.publish rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
 
@@ -32,21 +40,23 @@ runs {
         //systemProperty 'forge.logging.console.level', 'debug'
         systemProperty 'mixin.debug.verbose', 'true'
         systemProperty 'mixin.debug.export', 'true'
-        modSource project.sourceSets.main
     }
 
     client {
         systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         // TEMP-DEBUG: auto-join world for deadlock repro (REMOVE AFTER DEBUG)
-        argument '--quickPlaySingleplayer'
-        argument '新的世界'
+        // 临时注释：方案A验证需手动连 Demo 服务器（不自动进单人）
+        //argument '--quickPlaySingleplayer'
+        //argument '新的世界'
         // 关闭 JVM 热路径堆栈省略，便于定位并行子任务中反复抛出的 ClassCastException
         jvmArguments '-XX:-OmitStackTraceInFastThrow'
+        modSource project.sourceSets.main
     }
 
     server {
         systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         argument '--nogui'
+        modSource project.sourceSets.main
     }
 
     gameTestServer {

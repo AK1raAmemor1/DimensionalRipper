@@ -1,12 +1,17 @@
 package dev.modzuozhi.core.dimthread;
 
+import dev.modzuozhi.ModZuozhi;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.Level;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 
@@ -36,6 +41,21 @@ public final class EntityTickParallel {
     private static final int STRIPE_COUNT = 256;
     /** 分片读写锁数组：保护单个 {@code EntitySection} 的内容读写（{@code ClassInstanceMultiMap}）。 */
     private static final ReentrantReadWriteLock[] SECTION_LOCKS = new ReentrantReadWriteLock[STRIPE_COUNT];
+
+    /**
+     * 实体分片 Claim 门表：按维度隔离（不同维度的实体循环各自独立 claim，互不掉拍）。
+     * <p>
+     * 门状态跨 tick 存续：本 tick 提交的某片未完成前，下 tick 对该片 tryAcquire 失败 →
+     * 整片掉拍延后（等价"该片本 tick 视为空"）。阶段收口 {@link FineGrainScheduler.Barrier#await()}
+     * 只等待"实际提交的片"，慢片不再阻塞维度 worker（借鉴 Tessellate 慢区域掉拍思想）。
+     */
+    private static final ConcurrentHashMap<ResourceKey<?>, ShardGate> GATES = new ConcurrentHashMap<>();
+
+    /** 累计掉拍分片数（诊断 / status 展示）。 */
+    private static final LongAdder MISSED_SHARDS = new LongAdder();
+
+    /** 实体分片并行的独立开关（默认开启；关闭时回退旧的批式 submitBatch 路径）。 */
+    private static volatile boolean sharded = true;
 
     /**
      * 当前线程的锁配对栈：记录每次 lock 调用时<b>是否真正加了锁</b>，unlock 时弹出对应决定。
@@ -137,19 +157,64 @@ public final class EntityTickParallel {
         return CURRENT.get();
     }
 
+    /** 实体分片并行开关（默认开启；关闭时回退旧的批式 {@code submitBatch} 路径）。 */
+    public static boolean isSharded() {
+        return sharded;
+    }
+
+    public static void setSharded(boolean value) {
+        sharded = value;
+        ModZuozhi.LOGGER.info("[EntityTick] 实体分片并行已切换为 {}", value ? "开启" : "关闭");
+    }
+
+    /** 累计掉拍分片数（诊断 / {@code status} 展示）。 */
+    public static long missedShards() {
+        return MISSED_SHARDS.sum();
+    }
+
     /**
      * 本 tick 收集的一批待并行实体（同一 consumer，即 {@code tickNonPassenger}）。
-     * 收集代替逐实体提交：循环结束后统一按线程池大小切成块提交，把每实体一次的
-     * 调度/屏障计数开销从 O(实体数) 降到 O(线程数)。
+     * 收集代替逐实体提交：循环结束后按稳定 id 分片，每片独立提交（分片 Claim 模型），
+     * 或按线程池大小切成块提交（非分片回退），把每实体一次的调度/屏障计数开销降到 O(线程数)。
      */
     public static final class Batch {
         public final MinecraftServer server;
         public final Consumer<Entity> consumer;
-        public final List<Entity> entities = new ArrayList<>();
+        public final ResourceKey<Level> dimension;
+        /** 按分片存放的实体列表（索引 = entity.getId() & (SHARDS-1)）。 */
+        private final List<Entity>[] shards = new List[ShardGate.SHARDS];
 
-        public Batch(MinecraftServer server, Consumer<Entity> consumer) {
+        public Batch(MinecraftServer server, Consumer<Entity> consumer, ResourceKey<Level> dimension) {
             this.server = server;
             this.consumer = consumer;
+            this.dimension = dimension;
+        }
+
+        /** 收集一个实体：按稳定 id 分流到对应分片（id 自增、分布均匀）。 */
+        public void add(Entity entity) {
+            int shard = entity.getId() & (ShardGate.SHARDS - 1);
+            List<Entity> list = this.shards[shard];
+            if (list == null) {
+                list = new ArrayList<>();
+                this.shards[shard] = list;
+            }
+            list.add(entity);
+        }
+
+        /** 全部分片数组（end 遍历用）。 */
+        public List<Entity>[] allShards() {
+            return this.shards;
+        }
+
+        /** 汇总全量实体列表（仅非分片回退路径使用）。 */
+        public List<Entity> merged() {
+            List<Entity> all = new ArrayList<>();
+            for (List<Entity> shard : this.shards) {
+                if (shard != null) {
+                    all.addAll(shard);
+                }
+            }
+            return all;
         }
     }
 
@@ -157,10 +222,10 @@ public final class EntityTickParallel {
     public static void collect(MinecraftServer server, Consumer<Entity> consumer, Entity entity) {
         Batch batch = BATCH.get();
         if (batch == null) {
-            batch = new Batch(server, consumer);
+            batch = new Batch(server, consumer, entity.level().dimension());
             BATCH.set(batch);
         }
-        batch.entities.add(entity);
+        batch.add(entity);
     }
 
     /** 实体循环开始：为本维度 tick 建立实体子任务屏障（仅 worker 线程调用）。 */
@@ -169,8 +234,8 @@ public final class EntityTickParallel {
     }
 
     /**
-     * 实体循环结束（finally 中调用）：先把收集的实体批按块提交并行，再等待全部子任务完成
-     * 并执行延迟回调，清除上下文。
+     * 实体循环结束（finally 中调用）：分片模式先按片 Claim 提交（慢片掉拍延后），
+     * 再等待已提交的子任务全部完成并执行延迟回调，清除上下文。
      */
     public static void end() {
         FineGrainScheduler.Barrier barrier = CURRENT.get();
@@ -180,10 +245,45 @@ public final class EntityTickParallel {
         CURRENT.remove();
         Batch batch = BATCH.get();
         BATCH.remove();
-        if (batch != null && !batch.entities.isEmpty()) {
-            barrier.submitBatch(batch.server, batch.entities, batch.consumer);
+        if (batch != null) {
+            if (sharded) {
+                ShardGate gate = GATES.computeIfAbsent(batch.dimension, key -> new ShardGate());
+                List<Entity>[] shards = batch.allShards();
+                for (int s = 0; s < ShardGate.SHARDS; s++) {
+                    List<Entity> entities = shards[s];
+                    if (entities == null || entities.isEmpty()) {
+                        continue;
+                    }
+                    if (gate.tryAcquire(s)) {
+                        barrier.submitShard(batch.server, gate, s,
+                                () -> modzuozhi_tickShard(entities, batch.consumer));
+                    } else {
+                        MISSED_SHARDS.increment();
+                        ModZuozhi.LOGGER.debug("[EntityTick] 实体分片 {} 掉拍(上 tick 未完成)，整体延后 1 tick", s);
+                    }
+                }
+            } else {
+                List<Entity> all = batch.merged();
+                if (!all.isEmpty()) {
+                    barrier.submitBatch(batch.server, all, batch.consumer);
+                }
+            }
         }
         barrier.await();
         barrier.drain();
+    }
+
+    /** 分片内逐实体 tick：单实体异常隔离（与批式路径语义一致），异常计入 FaultGuard。 */
+    private static void modzuozhi_tickShard(List<Entity> entities, Consumer<Entity> consumer) {
+        for (Entity entity : entities) {
+            try {
+                if (!entity.isRemoved()) {
+                    consumer.accept(entity);
+                }
+            } catch (Throwable t) {
+                ModZuozhi.LOGGER.error("[EntityTick] 实体分片子任务异常", t);
+                FaultGuard.onSubTaskFailure();
+            }
+        }
     }
 }

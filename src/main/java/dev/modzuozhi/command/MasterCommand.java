@@ -4,6 +4,7 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 import dev.modzuozhi.ModZuozhi;
 import dev.modzuozhi.core.dimthread.DimThreadCore;
+import dev.modzuozhi.core.dimthread.EntityTickParallel;
 import dev.modzuozhi.core.dimthread.FaultGuard;
 import dev.modzuozhi.core.dimthread.FineGrainScheduler;
 import dev.modzuozhi.core.dimthread.TpsTracker;
@@ -36,7 +37,10 @@ public final class MasterCommand {
                         .then(literal("status").executes(MasterCommand::status))
                         .then(literal("fine")
                                 .then(literal("on").executes(ctx -> setFine(ctx, true)))
-                                .then(literal("off").executes(ctx -> setFine(ctx, false))))
+                                .then(literal("off").executes(ctx -> setFine(ctx, false)))
+                                .then(literal("sharded")
+                                        .then(literal("on").executes(ctx -> setSharded(ctx, true)))
+                                        .then(literal("off").executes(ctx -> setSharded(ctx, false)))))
                         .then(literal("nocollide")
                                 .then(literal("on").executes(ctx -> setNoCollide(ctx, true)))
                                 .then(literal("off").executes(ctx -> setNoCollide(ctx, false)))));
@@ -67,6 +71,13 @@ public final class MasterCommand {
         return 1;
     }
 
+    private static int setSharded(CommandContext<CommandSourceStack> ctx, boolean enabled) {
+        EntityTickParallel.setSharded(enabled);
+        ctx.getSource().sendSuccess(() ->
+                Component.literal("实体分片并行已" + (enabled ? "开启" : "关闭")), false);
+        return 1;
+    }
+
     private static int setNoCollide(CommandContext<CommandSourceStack> ctx, boolean enabled) {
         ModZuozhi.MOB_COLLISION_OFF = enabled;
         ctx.getSource().sendSuccess(() ->
@@ -92,9 +103,12 @@ public final class MasterCommand {
                 : TpsTracker.tps();
 
         String msg = String.format(
-                "modzuozhi 状态：细粒度=%s%s，禁碰撞=%s，故障原因：%s\n当前维度：%s，TPS：%.1f",
-                fine, fineMark, noCollide, reason,
-                dimensionName(dimension), tps);
+                "modzuozhi 状态：细粒度=%s%s，分片并行=%s，禁碰撞=%s，故障原因：%s\n"
+                        + "当前维度：%s，TPS：%.1f，掉拍分片累计：%d",
+                fine, fineMark,
+                EntityTickParallel.isSharded() ? "开启" : "关闭",
+                noCollide, reason,
+                dimensionName(dimension), tps, EntityTickParallel.missedShards());
         ctx.getSource().sendSuccess(() -> Component.literal(msg), false);
         return 1;
     }

@@ -247,6 +247,52 @@ public final class FineGrainScheduler {
             }
         }
 
+        /**
+         * 按分片提交一个子任务（分片 Claim 模型，借鉴 Tessellate 的"每区域 inFlight CAS claim"）。
+         * <p>
+         * 调用方必须先通过 {@link ShardGate#tryAcquire} 取得本片许可；本方法在任务完成后
+         * {@link ShardGate#release} 释放 claim。已提交该片的 {@code pending} 计入 barrier，
+         * 阶段末 {@link #await()} 只等待"实际提交的片"——掉拍（未抢到 claim）的片不在
+         * pending 内，维度 worker 不会为其阻塞。
+         * <p>
+         * 关闭（{@code enabled=false}）时同步串行执行并释放 claim，行为与原串行路径一致。
+         *
+         * @param gate  分片门（跨 tick 存续）
+         * @param shard 分片索引
+         * @param task  子任务（如某一片实体的 tick）
+         */
+        public void submitShard(MinecraftServer server, ShardGate gate, int shard, Runnable task) {
+            if (!FineGrainScheduler.enabled) {
+                gate.release(shard);
+                task.run();
+                return;
+            }
+            synchronized (this) {
+                pending++;
+            }
+            ACTIVE_SUBTASKS.incrementAndGet();
+            SUB_POOL.execute(() -> {
+                PostExecuteQueue prev = CURRENT_QUEUE.get();
+                CURRENT_QUEUE.set(postQueue);
+                try {
+                    task.run();
+                } catch (Throwable t) {
+                    ModZuozhi.LOGGER.error("[FineGrain] 子任务异常", t);
+                    FaultGuard.onSubTaskFailure();
+                } finally {
+                    CURRENT_QUEUE.set(prev);
+                    gate.release(shard);
+                    synchronized (this) {
+                        pending--;
+                        if (pending == 0) {
+                            latch.countDown();
+                        }
+                    }
+                    ACTIVE_SUBTASKS.decrementAndGet();
+                }
+            });
+        }
+
         /** 块内逐实体 tick：单实体异常隔离（等价原逐实体提交语义），异常计入 FaultGuard。 */
         private void modzuozhi_runChunk(List<Entity> chunk, Consumer<Entity> consumer) {
             PostExecuteQueue prev = CURRENT_QUEUE.get();
