@@ -7,8 +7,11 @@ import dev.modzuozhi.core.dimthread.DimThreadCore;
 import dev.modzuozhi.core.dimthread.EntityTickParallel;
 import dev.modzuozhi.core.dimthread.FaultGuard;
 import dev.modzuozhi.core.dimthread.FineGrainScheduler;
+import dev.modzuozhi.core.dimthread.ShardGate;
 import dev.modzuozhi.core.dimthread.TpsTracker;
+import dev.modzuozhi.core.filter.SerDesFilter;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -43,7 +46,11 @@ public final class MasterCommand {
                                         .then(literal("off").executes(ctx -> setSharded(ctx, false)))))
                         .then(literal("nocollide")
                                 .then(literal("on").executes(ctx -> setNoCollide(ctx, true)))
-                                .then(literal("off").executes(ctx -> setNoCollide(ctx, false)))));
+                                .then(literal("off").executes(ctx -> setNoCollide(ctx, false))))
+                        .then(literal("tewhitelist")
+                                .then(net.minecraft.commands.Commands.argument("type", net.minecraft.commands.arguments.ResourceLocationArgument.id())
+                                        .executes(MasterCommand::teWhitelist)))
+                        .then(literal("status").executes(MasterCommand::status)));
     }
 
     private static int setFine(CommandContext<CommandSourceStack> ctx, boolean enabled) {
@@ -74,7 +81,7 @@ public final class MasterCommand {
     private static int setSharded(CommandContext<CommandSourceStack> ctx, boolean enabled) {
         EntityTickParallel.setSharded(enabled);
         ctx.getSource().sendSuccess(() ->
-                Component.literal("实体分片并行已" + (enabled ? "开启" : "关闭")), false);
+                Component.literal("分片并行（实体/TE/区块环境）已" + (enabled ? "开启" : "关闭")), false);
         return 1;
     }
 
@@ -83,6 +90,16 @@ public final class MasterCommand {
         ctx.getSource().sendSuccess(() ->
                 Component.literal("实体间碰撞已" + (enabled ? "禁用" : "恢复")), false);
         ModZuozhi.LOGGER.info("[ModZuozhi] 实体间碰撞已切换为 {}", enabled ? "禁用" : "恢复");
+        return 1;
+    }
+
+    /** 将指定 TE 注册名加入 modded 并行白名单（仅影响该 TE，不改全局 lockModded 保守策略）。 */
+    private static int teWhitelist(CommandContext<CommandSourceStack> ctx) {
+        String type = ResourceLocationArgument.getId(ctx, "type").toString();
+        SerDesFilter.whitelistModded(type);
+        ctx.getSource().sendSuccess(() ->
+                Component.literal("TE 白名单已添加: " + type + "（清单: " + SerDesFilter.moddedWhitelist() + "）"), false);
+        ModZuozhi.LOGGER.info("[ModZuozhi] TE 白名单新增 {}", type);
         return 1;
     }
 
@@ -104,11 +121,12 @@ public final class MasterCommand {
 
         String msg = String.format(
                 "modzuozhi 状态：细粒度=%s%s，分片并行=%s，禁碰撞=%s，故障原因：%s\n"
-                        + "当前维度：%s，TPS：%.1f，掉拍分片累计：%d",
+                        + "当前维度：%s，TPS：%.1f，掉拍分片累计：实体 %d / TE %d / 区块环境 %d",
                 fine, fineMark,
                 EntityTickParallel.isSharded() ? "开启" : "关闭",
                 noCollide, reason,
-                dimensionName(dimension), tps, EntityTickParallel.missedShards());
+                dimensionName(dimension), tps,
+                EntityTickParallel.missedShards(), ShardGate.teMissed(), ShardGate.chunkMissed());
         ctx.getSource().sendSuccess(() -> Component.literal(msg), false);
         return 1;
     }

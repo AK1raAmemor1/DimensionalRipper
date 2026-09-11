@@ -3,6 +3,7 @@ package dev.modzuozhi.core.filter;
 import net.minecraft.world.level.block.entity.TickingBlockEntity;
 
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 默认 SerDes 过滤器。
@@ -12,7 +13,8 @@ import java.util.Set;
  *     <li>黑名单（强制串行）：已知线程不安全、会与主线程交互的方块实体
  *         （如移动的活塞/活塞头，涉及跨区块移除与实体交互）。</li>
  *     <li>modded 方块实体（非 {@code minecraft:} 前缀）默认串行，保守兜底；
- *         可通过 {@link #setLockModded(boolean)} 关闭该保守行为。</li>
+ *         可通过 {@link #setLockModded(boolean)} 关闭该保守行为，或通过
+ *         {@link #whitelistModded(String)} 将确认线程安全的 modded TE 单独加入白名单。</li>
  *     <li>其余 vanilla 方块实体默认可并行。</li>
  * </ul>
  */
@@ -40,6 +42,24 @@ public final class SerDesFilter implements ISerDesFilter {
     /** 是否对非 vanilla 的 modded 方块实体强制串行（保守兜底，默认开启）。 */
     private static volatile boolean lockModded = true;
 
+    /** 确认线程安全、可绕开 lockModded 强制串行的 modded TE 注册名白名单（运行时通过命令维护）。 */
+    private static final Set<String> MODDED_WHITELIST = ConcurrentHashMap.newKeySet();
+
+    /** 将某个 modded TE 注册名加入白名单，使其进入并行分片管线（本模组不保证其线程安全，加入前需自行确认）。 */
+    public static void whitelistModded(String type) {
+        MODDED_WHITELIST.add(type);
+    }
+
+    /** 移除白名单项（恢复默认的 modded 强制串行）。 */
+    public static void unwhitelistModded(String type) {
+        MODDED_WHITELIST.remove(type);
+    }
+
+    /** 当前白名单内容（诊断展示用）。 */
+    public static Set<String> moddedWhitelist() {
+        return MODDED_WHITELIST;
+    }
+
     public static void setLockModded(boolean lockModded) {
         SerDesFilter.lockModded = lockModded;
     }
@@ -55,7 +75,7 @@ public final class SerDesFilter implements ISerDesFilter {
             return false;
         }
         if (lockModded && !type.startsWith("minecraft:")) {
-            return false;
+            return MODDED_WHITELIST.contains(type);
         }
         return true;
     }

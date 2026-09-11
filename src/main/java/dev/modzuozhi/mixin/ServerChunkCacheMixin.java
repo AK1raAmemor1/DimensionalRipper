@@ -3,10 +3,15 @@ package dev.modzuozhi.mixin;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import dev.modzuozhi.ModZuozhi;
+import dev.modzuozhi.core.dimthread.ChunkLock;
 import dev.modzuozhi.core.dimthread.DimThreadCore;
+import dev.modzuozhi.core.dimthread.EntityTickParallel;
+import dev.modzuozhi.core.dimthread.FaultGuard;
 import dev.modzuozhi.core.dimthread.FineGrainScheduler;
 import dev.modzuozhi.core.dimthread.IChunkEnvTick;
 import dev.modzuozhi.core.dimthread.IMutableMainThread;
+import dev.modzuozhi.core.dimthread.ShardGate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.Registries;
@@ -274,6 +279,9 @@ public abstract class ServerChunkCacheMixin implements IMutableMainThread {
     /** 本次 chunk tick 的子任务屏障。 */
     @Unique
     private FineGrainScheduler.Barrier modzuozhi_chunkBarrier;
+    /** 区块环境分片门（跨 tick 存续，慢片掉拍时本 tick 该区块延后）。 */
+    @Unique
+    private ShardGate modzuozhi_chunkGate;
 
     @Unique
     private boolean modzuozhi_chunkShouldParallel() {
@@ -329,19 +337,77 @@ public abstract class ServerChunkCacheMixin implements IMutableMainThread {
         }
         MinecraftServer server = this.level.getServer();
         this.modzuozhi_chunkBarrier = FineGrainScheduler.beginBarrier();
-        for (Object[] entry : this.modzuozhi_pendingChunks) {
-            ServerLevel level = (ServerLevel) entry[0];
-            LevelChunk chunk = (LevelChunk) entry[1];
-            int randomTickSpeed = (Integer) entry[2];
-            this.modzuozhi_chunkBarrier.submit(server, () -> {
-                // 线程本地随机源，避免并行子任务跨线程访问共享 Level.random
-                ((IChunkEnvTick) level).modzuozhi_tickChunk(chunk, randomTickSpeed, RandomSource.create());
-            }, chunk.getPos().getWorldPosition());
+        this.modzuozhi_chunkGate = ShardGate.chunkGate(this.level.dimension());
+        boolean sharded = EntityTickParallel.isSharded();
+        if (sharded) {
+            // 分片模式：先按区块坐标稳定散列聚合收集，收口时每片只 tryAcquire 一次。
+            // 逐区块 tryAcquire 会让同片第 2 个起的区块全部被同拍竞争误判为掉拍（永不随机 tick）。
+            List<Object[]>[] shards = new List[ShardGate.SHARDS];
+            for (Object[] entry : this.modzuozhi_pendingChunks) {
+                LevelChunk chunk = (LevelChunk) entry[1];
+                ChunkPos cpos = chunk.getPos();
+                int s = ShardGate.shardOf(ChunkPos.asLong(cpos.x, cpos.z));
+                List<Object[]> list = shards[s];
+                if (list == null) {
+                    list = new ArrayList<>();
+                    shards[s] = list;
+                }
+                list.add(entry);
+            }
+            for (int s = 0; s < ShardGate.SHARDS; s++) {
+                List<Object[]> list = shards[s];
+                if (list == null || list.isEmpty()) {
+                    continue;
+                }
+                if (this.modzuozhi_chunkGate.tryAcquire(s)) {
+                    this.modzuozhi_chunkBarrier.submitShard(server, this.modzuozhi_chunkGate, s,
+                            () -> modzuozhi_tickChunkShard(list));
+                } else {
+                    ShardGate.bumpChunkMissed();
+                    ModZuozhi.LOGGER.debug("[ChunkEnv] 分片 {} 掉拍(上 tick 未完成)，整片延后 1 tick", s);
+                }
+            }
+        } else {
+            for (Object[] entry : this.modzuozhi_pendingChunks) {
+                ServerLevel level = (ServerLevel) entry[0];
+                LevelChunk chunk = (LevelChunk) entry[1];
+                int randomTickSpeed = (Integer) entry[2];
+                Runnable task = () -> {
+                    // 线程本地随机源，避免并行子任务跨线程访问共享 Level.random
+                    ((IChunkEnvTick) level).modzuozhi_tickChunk(chunk, randomTickSpeed, RandomSource.create());
+                };
+                this.modzuozhi_chunkBarrier.submit(server, task, chunk.getPos().getWorldPosition());
+            }
         }
         this.modzuozhi_pendingChunks.clear();
         this.modzuozhi_chunkBarrier.await();
         this.modzuozhi_chunkBarrier.drain();
         this.modzuozhi_chunkBarrier = null;
+        this.modzuozhi_chunkGate = null;
         this.modzuozhi_chunkParallel = false;
+    }
+
+    /**
+     * 分片内逐个区块做环境 tick：保持原逐区块提交的区块锁语义（防止与 TE / 实体阶段
+     * 并发访问同一区块），每个区块独立线程本地随机源，单区块异常隔离。
+     */
+    @Unique
+    private void modzuozhi_tickChunkShard(List<Object[]> list) {
+        long t0 = System.nanoTime();
+        for (Object[] entry : list) {
+            ServerLevel level = (ServerLevel) entry[0];
+            LevelChunk chunk = (LevelChunk) entry[1];
+            int randomTickSpeed = (Integer) entry[2];
+            try (AutoCloseable lock = ChunkLock.lock(chunk.getPos().getWorldPosition())) {
+                ((IChunkEnvTick) level).modzuozhi_tickChunk(chunk, randomTickSpeed, RandomSource.create());
+            } catch (Throwable t) {
+                ModZuozhi.LOGGER.error("[ChunkEnv] 分片子任务异常", t);
+                FaultGuard.onSubTaskFailure();
+            }
+        }
+        // 观测型掉拍：本片负载没能在单 tick 预算内处理完（慢片），累计一次。
+        if (System.nanoTime() - t0 > ShardGate.TICK_BUDGET_NS) {
+            ShardGate.bumpChunkMissed();
+        }
     }
 }

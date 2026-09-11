@@ -60,4 +60,19 @@ public final class DimThreadCore {
     public static boolean owns(Thread thread) {
         return thread.getName().startsWith(MOD_ID + "_server_");
     }
+
+    /** 查询是否处于单机暂停状态。 */
+    public static boolean isPaused() {
+        return MANAGER.isPaused();
+    }
+
+    /**
+     * 单机内嵌服务器暂停/恢复信号（见 {@link ServerManager#setPaused}）。
+     * <p>
+     * 由客户端 mixin {@code MixinMinecraftPauseDetector} 在每帧 {@code Minecraft.runTick} 检测
+     * {@code isPaused()} 变化后调用；dedicated server 无客户端，永不会触发。
+     */
+    public static void setPaused(boolean paused) {
+        MANAGER.setPaused(paused);
+    }
 }

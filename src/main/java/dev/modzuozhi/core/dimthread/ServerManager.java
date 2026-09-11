@@ -52,6 +52,16 @@ public class ServerManager {
         this.actives.put(server, value);
     }
 
+    /** 是否处于单机暂停（ESC 菜单）状态。 */
+    public boolean isPaused() {
+        for (LevelTickLoop loop : this.loops.values()) {
+            if (loop.isPaused()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public ThreadPool getThreadPool(MinecraftServer server) {
         // 初始尺寸取 CPU 核数兜底，实际线程数由 syncThreadCount 每 tick 贴合维度数
         return this.threadPools.computeIfAbsent(server, s -> {
@@ -191,6 +201,39 @@ public class ServerManager {
             if (player.connection != null) {
                 routeConnection(player.connection.getConnection(), player.serverLevel());
             }
+        }
+    }
+
+    /**
+     * 单机内嵌服务器暂停/恢复（由客户端 {@code Minecraft.isPaused()} 驱动，见
+     * {@code MixinMinecraftPauseDetector}）。
+     * <p>
+     * 暂停时：先取消所有维度 loop 的下一拍，再等待正在执行的那一拍完全收口（含其内部
+     * 并行子任务屏障），使所有维度 worker 彻底停摆——暂停/保存期间不再有任何线程并行写入
+     * {@code LevelChunk}；否则维度 worker 与主线程「暂停并保存」并发，区块数据包序列化读到
+     * 中间态，客户端解码越界（"网络协议错误"）掉线（历史 bug：ESC 暂停后 0.5s 必掉线）。
+     * <p>
+     * 恢复时：重新排程所有维度 loop。LAN 开放时客户端 {@code isPaused()} 恒 false，不会误暂停。
+     */
+    public void setPaused(boolean paused) {
+        if (paused) {
+            this.loops.values().forEach(LevelTickLoop::pause);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            boolean anyTicking = true;
+            while (anyTicking && System.nanoTime() < deadline) {
+                anyTicking = false;
+                for (LevelTickLoop loop : this.loops.values()) {
+                    if (loop.isTicking()) {
+                        anyTicking = true;
+                        break;
+                    }
+                }
+                if (anyTicking) {
+                    LockSupport.parkNanos(100_000L); // 0.1ms 退避
+                }
+            }
+        } else {
+            this.loops.values().forEach(LevelTickLoop::resume);
         }
     }
 

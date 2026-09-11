@@ -60,6 +60,8 @@ public final class LevelTickLoop implements Runnable, java.util.concurrent.Execu
     private volatile boolean scheduled = false;
     /** 是否正在执行一次 tick（health 检查用）。 */
     private volatile boolean ticking = false;
+    /** 单机内嵌服务器暂停（ESC 菜单）时置 true：取消下一拍并不再自排，杜绝暂停/保存期间并行写区块。 */
+    private volatile boolean paused = false;
 
     /** 本循环独立的 tick 计数（用于每 20 tick 的时间同步）。 */
     private int tickCount;
@@ -97,7 +99,11 @@ public final class LevelTickLoop implements Runnable, java.util.concurrent.Execu
 
     /** 首次启动（或外部主动重排）本循环。 */
     public void schedule() {
-        this.currentTickTask = this.masterPool.submit(this);
+        try {
+            this.currentTickTask = this.masterPool.submit(this);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // masterPool 已被关闭（停机/降级/重启用）：放弃排程，run 内的 running 检查兜底
+        }
     }
 
     /** 每 tick 由主线程调用：保证本 loop 只启动一次自排程。 */
@@ -106,6 +112,37 @@ public final class LevelTickLoop implements Runnable, java.util.concurrent.Execu
             this.scheduled = true;
             this.schedule();
         }
+    }
+
+    public boolean isPaused() {
+        return this.paused;
+    }
+
+    /**
+     * 暂停本维度循环（单机暂停场景调用）：置暂停标志并取消尚未开始的下一拍。
+     * <p>
+     * 正在执行的当前拍会自然跑完（其 finally 检查暂停后不再续排），随后维度 worker 完全停摆，
+     * 不再有任何并行写入 LevelChunk 的随机tick/TE/实体，消灭「暂停/保存期间区块数据包序列化
+     * 读到中间态 → 客户端解码越界 → 网络协议错误掉线」的竞态。
+     */
+    public void pause() {
+        if (this.paused) {
+            return;
+        }
+        this.paused = true;
+        Future<?> task = this.currentTickTask;
+        if (task != null && !task.isCancelled()) {
+            task.cancel(false);
+        }
+    }
+
+    /** 恢复本维度循环：立即重排下一拍。 */
+    public void resume() {
+        if (!this.paused) {
+            return;
+        }
+        this.paused = false;
+        this.schedule();
     }
 
     public void addConnection(Connection connection) {
@@ -124,6 +161,12 @@ public final class LevelTickLoop implements Runnable, java.util.concurrent.Execu
     @Override
     public void run() {
         DimThreadCore.attach(Thread.currentThread(), this.level);
+        // 暂停期间若仍有取消失败/竞态残留的任务被执行，直接放弃本拍（不进入维度 tick，不续排）；
+        // 正常路径下 pause() 会 cancel 掉当前拍，这里只是兜底。
+        if (this.paused || !this.running) {
+            this.currentTickTask = null;
+            return;
+        }
         this.ticking = true;
 
         MinecraftServer server = this.level.getServer();
@@ -149,10 +192,14 @@ public final class LevelTickLoop implements Runnable, java.util.concurrent.Execu
             FaultGuard.onDimTickFailure(t);
         } finally {
             this.ticking = false;
-            long remaining = Math.max(0L, deadline - System.nanoTime());
-            if (this.running) {
-                this.currentTickTask = this.masterPool.schedule(this, remaining, TimeUnit.NANOSECONDS);
-            } else {
+            if (this.running && !this.paused) {
+                long remaining = Math.max(0L, deadline - System.nanoTime());
+                try {
+                    this.currentTickTask = this.masterPool.schedule(this, remaining, TimeUnit.NANOSECONDS);
+                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                    // masterPool 已关闭：放弃续排
+                }
+            } else if (!this.running) {
                 ModZuozhi.LOGGER.info("[DimThread] 维度 {} 独立循环已停止", this.level.dimension().location());
             }
         }

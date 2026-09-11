@@ -51,7 +51,14 @@ public final class EntityTickParallel {
      */
     private static final ConcurrentHashMap<ResourceKey<?>, ShardGate> GATES = new ConcurrentHashMap<>();
 
-    /** 累计掉拍分片数（诊断 / status 展示）。 */
+    /**
+     * 累计掉拍分片数（诊断 / status 展示）。
+     * <p>
+     * 观测型指标：{@link #modzuozhi_tickShard} 中分片任务实际耗时 &gt; {@link ShardGate#TICK_BUDGET_NS}
+     * （一 tick 预算）即计一次"该片本 tick 掉拍"——它没能在一拍时间内处理完本片负载（慢片）。
+     * claim 抢占失败路径因阶段收口 {@link FineGrainScheduler.Barrier#await()} 会在本 tick 内等齐
+     * 所有已提交分片，结构上不可达，仅保留作为兜底。
+     */
     private static final LongAdder MISSED_SHARDS = new LongAdder();
 
     /** 实体分片并行的独立开关（默认开启；关闭时回退旧的批式 submitBatch 路径）。 */
@@ -164,10 +171,10 @@ public final class EntityTickParallel {
 
     public static void setSharded(boolean value) {
         sharded = value;
-        ModZuozhi.LOGGER.info("[EntityTick] 实体分片并行已切换为 {}", value ? "开启" : "关闭");
+        ModZuozhi.LOGGER.info("[EntityTick] 分片并行（实体/TE/区块环境）已切换为 {}", value ? "开启" : "关闭");
     }
 
-    /** 累计掉拍分片数（诊断 / {@code status} 展示）。 */
+    /** 累计掉拍分片数（诊断 / {@code status} 展示；观测型，见 {@link #MISSED_SHARDS}）。 */
     public static long missedShards() {
         return MISSED_SHARDS.sum();
     }
@@ -275,6 +282,7 @@ public final class EntityTickParallel {
 
     /** 分片内逐实体 tick：单实体异常隔离（与批式路径语义一致），异常计入 FaultGuard。 */
     private static void modzuozhi_tickShard(List<Entity> entities, Consumer<Entity> consumer) {
+        long t0 = System.nanoTime();
         for (Entity entity : entities) {
             try {
                 if (!entity.isRemoved()) {
@@ -284,6 +292,10 @@ public final class EntityTickParallel {
                 ModZuozhi.LOGGER.error("[EntityTick] 实体分片子任务异常", t);
                 FaultGuard.onSubTaskFailure();
             }
+        }
+        // 观测型掉拍：本片负载没能在单 tick 预算内处理完（慢片），累计一次。
+        if (System.nanoTime() - t0 > ShardGate.TICK_BUDGET_NS) {
+            MISSED_SHARDS.increment();
         }
     }
 }
