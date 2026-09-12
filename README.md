@@ -25,7 +25,7 @@ Dimensional Ripper 是一个基于 **NeoForge 1.21.1** 的多线程维度并行�
 - **机器 tick 并行**：熔炉、箱子、信标等原版方块实体的 tick 按位置分片并行。
 - **POI 并发化**：村民找床/找工作点查询不再排队等锁。
 - **方块更新/掉落/游戏事件**：收集器、掉落物捕捉、游戏事件分发重定向到正确线程。
-- **保守串行清单**（有意为之，非未实现）：漏斗/投掷器/发射器/雕刻书架/合成器/蜂巢（跨容器 5×5 访问、共享 Level 级随机源，并行会数据竞争，见 `SerDesFilter.BLACKLIST`）；第三方模组 TE 默认串行，可 `/dimensionalripper tewhitelist <注册名>` 加入白名单放行。
+- **保守串行清单（黑名单）**（有意为之，非未实现）：漏斗/投掷器/发射器/雕刻书架/合成器/蜂巢（跨容器 5×5 访问、共享 Level 级随机源，并行会数据竞争，见 `SerDesFilter.BLACKLIST`），黑名单内置不可命令修改；第三方模组 TE 默认串行，可用白名单指令放行（见下）。
 
 ### 🎒 物品
 - 物品本身无独立并行优化（合成、堆叠仍走原版逻辑）；掉落物作为实体参与并行 tick，方块掉落物在正确线程处理。
@@ -54,6 +54,10 @@ Dimensional Ripper 是一个基于 **NeoForge 1.21.1** 的多线程维度并行�
 | `/dimensionalripper fine on\|off` | 开关维度内细粒度并行（实体/方块实体/区块环境） |
 | `/dimensionalripper fine sharded on\|off` | 开关分片并行（实体/TE/区块环境，ShardGate，默认开启） |
 | `/dimensionalripper nocollide on\|off` | 开关实体碰撞优化（默认开启） |
+| `/dimensionalripper tewhitelist <注册名>` | **白名单**：将指定第三方模组方块实体（TE）加入并行白名单放行（如 `stresskit:heavy_furnace`） |
+| `/dimensionalripper teunwhitelist <注册名>` | 从并行白名单移除该 TE（恢复默认强制串行；重启服务器也会自动清空白名单） |
+
+> **白名单说明**：第三方模组 TE 默认串行处理（保守策略），加入白名单后才会进入并行分片管线。黑名单（漏斗/发射器等原版保守串行 TE）为内置硬编码，**不支持命令添加/移除**。
 
 模组**默认启用**多线程与分片并行，开箱即用，无需额外配置。
 

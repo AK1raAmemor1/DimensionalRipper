@@ -50,6 +50,9 @@ public final class MasterCommand {
                         .then(literal("tewhitelist")
                                 .then(net.minecraft.commands.Commands.argument("type", net.minecraft.commands.arguments.ResourceLocationArgument.id())
                                         .executes(MasterCommand::teWhitelist)))
+                        .then(literal("teunwhitelist")
+                                .then(net.minecraft.commands.Commands.argument("type", net.minecraft.commands.arguments.ResourceLocationArgument.id())
+                                        .executes(MasterCommand::teUnwhitelist)))
                         .then(literal("status").executes(MasterCommand::status)));
     }
 
@@ -100,6 +103,17 @@ public final class MasterCommand {
         ctx.getSource().sendSuccess(() ->
                 Component.literal("TE 白名单已添加: " + type + "（清单: " + SerDesFilter.moddedWhitelist() + "）"), false);
         ModZuozhi.LOGGER.info("[ModZuozhi] TE 白名单新增 {}", type);
+        return 1;
+    }
+
+    /** 将指定 TE 注册名移出 modded 并行白名单（恢复该 modded TE 默认的强制串行）。 */
+    private static int teUnwhitelist(CommandContext<CommandSourceStack> ctx) {
+        String type = ResourceLocationArgument.getId(ctx, "type").toString();
+        boolean removed = SerDesFilter.unwhitelistModded(type);
+        ctx.getSource().sendSuccess(() ->
+                Component.literal("TE 白名单已" + (removed ? "移除" : "移除（原本不在白名单中）") + ": " + type
+                        + "（清单: " + SerDesFilter.moddedWhitelist() + "）"), false);
+        ModZuozhi.LOGGER.info("[ModZuozhi] TE 白名单移除 {}", type);
         return 1;
     }
 

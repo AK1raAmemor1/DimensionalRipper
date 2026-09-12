@@ -50,9 +50,9 @@ public final class SerDesFilter implements ISerDesFilter {
         MODDED_WHITELIST.add(type);
     }
 
-    /** 移除白名单项（恢复默认的 modded 强制串行）。 */
-    public static void unwhitelistModded(String type) {
-        MODDED_WHITELIST.remove(type);
+    /** 移除白名单项（恢复默认的 modded 强制串行）；返回是否真的存在并移除了该项。 */
+    public static boolean unwhitelistModded(String type) {
+        return MODDED_WHITELIST.remove(type);
     }
 
     /** 当前白名单内容（诊断展示用）。 */
